@@ -143,8 +143,6 @@
             display: flex; align-items: center; justify-content: center;
             overflow: hidden;
             padding: calc(var(--nav-h) + 80px) 32px 100px;
-            background:
-                url('/scorekarte.ch/resources/hero.jpeg') center 40% / cover no-repeat;
         }
         /* Dark gradient overlay */
         .hero::before {
@@ -575,9 +573,55 @@
             .nav-logo-text { display: none; }
             .footer-links { grid-template-columns: 1fr; }
         }
+        /* =============================================
+           PARALLAX CANVAS HERO
+        ============================================= */
+        #hero-canvas {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100vw; height: 100vh;
+            z-index: -1;
+            display: block;
+        }
+        #parallax-loader {
+            position: fixed; inset: 0;
+            background: var(--bg);
+            z-index: 2000;
+            display: flex; align-items: center; justify-content: center;
+            flex-direction: column; gap: 14px;
+            transition: opacity 0.6s ease;
+        }
+        #parallax-loader.loaded { opacity: 0; pointer-events: none; }
+        .px-ring {
+            width: 34px; height: 34px;
+            border: 2px solid rgba(255,255,255,0.12);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: px-spin 0.7s linear infinite;
+        }
+        @keyframes px-spin { to { transform: rotate(360deg); } }
+        .px-loader-text {
+            font-size: 0.72rem; letter-spacing: 0.16em;
+            color: rgba(255,255,255,0.38); text-transform: uppercase;
+        }
+        /* Curtain: post-hero content slides over the fixed canvas */
+        .page-curtain {
+            position: relative;
+            z-index: 2;
+            background: var(--bg);
+        }
     </style>
 </head>
 <body>
+
+    <!-- Parallax Canvas Background -->
+    <canvas id="hero-canvas" aria-hidden="true"></canvas>
+
+    <!-- Loading Screen -->
+    <div id="parallax-loader">
+        <div class="px-ring"></div>
+        <span class="px-loader-text">Laden… / Chargement…</span>
+    </div>
 
     <div class="menu-overlay" id="menuOverlay" onclick="toggleMenu()"></div>
 
@@ -640,6 +684,9 @@
         </div>
         <div class="hero-scroll" aria-hidden="true"><div class="hero-scroll-line"></div></div>
     </section>
+
+    <!-- CURTAIN: slides over the fixed canvas on scroll -->
+    <div class="page-curtain">
 
     <!-- AD BANNER -->
     <div class="ad-wrap">
@@ -865,6 +912,8 @@
             </div>
         </div>
     </footer>
+
+    </div><!-- /page-curtain -->
 
     <script>
         /* ============================================================
@@ -1208,6 +1257,151 @@
            INIT
         ============================================================ */
         initializeScoreInputs();
+    </script>
+
+    <!-- ============================================================
+         PARALLAX HERO ENGINE — Canvas + RAF + Lerp + Crossfade
+         Vanilla JS, no external dependencies
+    ============================================================ -->
+    <script>
+    (function () {
+        'use strict';
+
+        /* ── 1. ASSETS ── */
+        const SRC = [
+            "https://mcusercontent.com/39ee075a12433f7ae22a01c8b/images/a3d6d87c-aebd-8857-9213-51501d4f8651.png",
+            "https://mcusercontent.com/39ee075a12433f7ae22a01c8b/images/85c0fab6-de9c-0d52-6777-264a51e2c686.png",
+            "https://mcusercontent.com/39ee075a12433f7ae22a01c8b/images/96b3cf07-ad3a-e38a-d2d1-09215ade2ddf.png",
+            "https://mcusercontent.com/39ee075a12433f7ae22a01c8b/images/50e25ece-fd62-c1ac-fc0b-c7dbbebd0c65.png",
+            "https://mcusercontent.com/39ee075a12433f7ae22a01c8b/images/b6ef49bd-c210-4938-0b35-8e10daae2631.png"
+        ];
+
+        /* ── 2. CONFIG ── */
+        const LERP  = 0.075;
+        const RESIZE_DEBOUNCE = 150;
+
+        /* ── 3. REFS ── */
+        const canvas  = document.getElementById('hero-canvas');
+        const ctx     = canvas.getContext('2d');
+        const heroEl  = document.getElementById('heroSection');
+        const loader  = document.getElementById('parallax-loader');
+
+        /* ── 4. STATE ── */
+        const imgs    = new Array(SRC.length);
+        let cw = 0, ch = 0;
+        let scrollTarget = 0, scrollCurrent = 0;
+        let lastRendered = -1;
+        let resizeTimer  = null;
+
+        /* ── 5. MATH HELPERS ── */
+        function lerp(a, b, t)      { return a + (b - a) * t; }
+        function clamp(v, lo, hi)   { return v < lo ? lo : v > hi ? hi : v; }
+
+        function coverRect(img) {
+            const iw = img.naturalWidth,  ih = img.naturalHeight;
+            const cr = cw / ch,           ir = iw / ih;
+            let sw, sh, sx, sy;
+            if (ir > cr) {
+                sh = ih; sw = ih * cr;
+                sx = (iw - sw) * 0.5; sy = 0;
+            } else {
+                sw = iw; sh = iw / cr;
+                sx = 0; sy = (ih - sh) * 0.5;
+            }
+            return { sx, sy, sw, sh };
+        }
+
+        /* ── 6. CANVAS RESIZE ── */
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            cw = window.innerWidth;
+            ch = window.innerHeight;
+            canvas.width  = cw * dpr;
+            canvas.height = ch * dpr;
+            canvas.style.width  = cw + 'px';
+            canvas.style.height = ch + 'px';
+            ctx.scale(dpr, dpr);
+        }
+
+        function onResize() {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(function () {
+                resizeCanvas();
+                drawFrame(scrollCurrent);
+            }, RESIZE_DEBOUNCE);
+        }
+
+        /* ── 7. DRAW ── */
+        function drawFrame(scroll) {
+            const heroH    = heroEl ? heroEl.offsetHeight : ch;
+            const progress = clamp(scroll / heroH, 0, 1);
+            const fi   = progress * (imgs.length - 1);
+            const idxA = Math.floor(fi);
+            const idxB = Math.min(idxA + 1, imgs.length - 1);
+            const t    = fi - idxA;
+
+            ctx.clearRect(0, 0, cw, ch);
+
+            if (imgs[idxA]) {
+                const r = coverRect(imgs[idxA]);
+                ctx.globalAlpha = 1 - t;
+                ctx.drawImage(imgs[idxA], r.sx, r.sy, r.sw, r.sh, 0, 0, cw, ch);
+            }
+            if (imgs[idxB] && idxB !== idxA) {
+                const r = coverRect(imgs[idxB]);
+                ctx.globalAlpha = t;
+                ctx.drawImage(imgs[idxB], r.sx, r.sy, r.sw, r.sh, 0, 0, cw, ch);
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        /* ── 8. RAF LOOP ── */
+        function loop() {
+            scrollTarget  = window.scrollY;
+            scrollCurrent = lerp(scrollCurrent, scrollTarget, LERP);
+            if (Math.abs(scrollCurrent - lastRendered) > 0.08) {
+                drawFrame(scrollCurrent);
+                lastRendered = scrollCurrent;
+            }
+            requestAnimationFrame(loop);
+        }
+
+        /* ── 9. PRELOAD ── */
+        function preload() {
+            var pending = SRC.length;
+            return new Promise(function (resolve) {
+                SRC.forEach(function (src, i) {
+                    var img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    img.onload = function () {
+                        (img.decode ? img.decode() : Promise.resolve())
+                            .catch(function () {})
+                            .then(function () {
+                                imgs[i] = img;
+                                if (--pending === 0) resolve();
+                            });
+                    };
+                    img.onerror = function () { if (--pending === 0) resolve(); };
+                    img.src = src;
+                });
+            });
+        }
+
+        /* ── 10. INIT ── */
+        async function init() {
+            resizeCanvas();
+            window.addEventListener('resize', onResize, { passive: true });
+            await preload();
+            drawFrame(0);
+            if (loader) {
+                loader.classList.add('loaded');
+                setTimeout(function () { loader.style.display = 'none'; }, 700);
+            }
+            requestAnimationFrame(loop);
+        }
+
+        init();
+    }());
     </script>
 </body>
 </html>
